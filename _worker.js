@@ -10,6 +10,8 @@ let 缓存SOCKS5白名单 = null,
   缓存反代解析数组,
   缓存反代数组索引 = 0,
   启用反代兜底 = true,
+  落地代理 = null,
+  parsed落地代理 = {},
   调试日志打印 = false;
 let SOCKS5白名单 = [
   "*tapecontent.net",
@@ -3250,69 +3252,79 @@ async function forwardataTCP(
 
     const 当前连接任务 = (async () => {
       let newSocket;
+      // 如果配置了落地代理，第一跳连接到落地代理服务器
+      const 落地代理有效 = 落地代理 && parsed落地代理.hostname;
+      const 第一跳目标主机 = 落地代理有效 ? parsed落地代理.hostname : host;
+      const 第一跳目标端口 = 落地代理有效 ? parsed落地代理.port : portNum;
+      if (落地代理有效) {
+        log(`[落地代理] 链路: CF Worker → 第一跳(${启用SOCKS5反代 || "proxyip"}) → 落地代理(${落地代理}://${parsed落地代理.hostname}:${parsed落地代理.port}) → 目标(${host}:${portNum})`);
+      }
       if (启用SOCKS5反代 === "socks5") {
-        log(`[SOCKS5代理] 代理到: ${host}:${portNum}`);
-        newSocket = await socks5Connect(host, portNum, 本次首包数据, TCP连接);
+        log(`[SOCKS5代理] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
+        newSocket = await socks5Connect(第一跳目标主机, 第一跳目标端口, null, TCP连接);
       } else if (启用SOCKS5反代 === "http") {
-        log(`[HTTP代理] 代理到: ${host}:${portNum}`);
+        log(`[HTTP代理] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
         newSocket = await httpConnect(
-          host,
-          portNum,
-          本次首包数据,
+          第一跳目标主机,
+          第一跳目标端口,
+          null,
           false,
           TCP连接,
         );
       } else if (启用SOCKS5反代 === "https") {
-        log(`[HTTPS代理] 代理到: ${host}:${portNum}`);
+        log(`[HTTPS代理] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
         newSocket = isIPHostname(parsedSocks5Address.hostname)
-          ? await httpsConnect(host, portNum, 本次首包数据, TCP连接)
-          : await httpConnect(host, portNum, 本次首包数据, true, TCP连接);
+          ? await httpsConnect(第一跳目标主机, 第一跳目标端口, null, TCP连接)
+          : await httpConnect(第一跳目标主机, 第一跳目标端口, null, true, TCP连接);
       } else if (启用SOCKS5反代 === "turn") {
-        log(`[TURN代理] 代理到: ${host}:${portNum}`);
+        log(`[TURN代理] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
         newSocket = await turnConnect(
           parsedSocks5Address,
-          host,
-          portNum,
+          第一跳目标主机,
+          第一跳目标端口,
           TCP连接,
         );
-        if (有效数据长度(本次首包数据) > 0) {
+        if (!落地代理有效 && 有效数据长度(本次首包数据) > 0) {
           const writer = newSocket.writable.getWriter();
-          try {
-            await writer.write(数据转Uint8Array(本次首包数据));
-          } finally {
-            try {
-              writer.releaseLock();
-            } catch (e) {}
-          }
+          try { await writer.write(数据转Uint8Array(本次首包数据)); }
+          finally { try { writer.releaseLock(); } catch (e) {} }
         }
       } else if (启用SOCKS5反代 === "sstp") {
-        log(`[SSTP代理] 代理到: ${host}:${portNum}`);
+        log(`[SSTP代理] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
         newSocket = await sstpConnect(
           parsedSocks5Address,
-          host,
-          portNum,
+          第一跳目标主机,
+          第一跳目标端口,
           TCP连接,
         );
-        if (有效数据长度(本次首包数据) > 0) {
+        if (!落地代理有效 && 有效数据长度(本次首包数据) > 0) {
           const writer = newSocket.writable.getWriter();
-          try {
-            await writer.write(数据转Uint8Array(本次首包数据));
-          } finally {
-            try {
-              writer.releaseLock();
-            } catch (e) {}
-          }
+          try { await writer.write(数据转Uint8Array(本次首包数据)); }
+          finally { try { writer.releaseLock(); } catch (e) {} }
         }
       } else {
-        log(`[反代连接] 代理到: ${host}:${portNum}`);
-        const 所有反代数组 = await 解析地址端口(反代IP, host, yourUUID);
+        log(`[反代连接] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
+        const 所有反代数组 = await 解析地址端口(反代IP, 第一跳目标主机, yourUUID);
         newSocket = await connectDirect(
           atob("UFJPWFlJUC50cDEuMDkwMjI3Lnh5eg=="),
           1,
-          本次首包数据,
+          null,
           所有反代数组,
           启用反代兜底,
         );
+      }
+      // 如果有落地代理，通过已建立的连接进行第二跳转发
+      if (落地代理有效) {
+        log(`[落地代理] 经第二跳 ${落地代理} 代理到目标: ${host}:${portNum}`);
+        newSocket = await 通过上游连接落地代理(
+          host, portNum, 本次首包数据,
+          落地代理, parsed落地代理,
+          () => newSocket,
+        );
+      } else if (本次发送首包 && 有效数据长度(本次首包数据) > 0) {
+        const writer = newSocket.writable.getWriter();
+        try { await writer.write(数据转Uint8Array(本次首包数据)); }
+        finally { try { writer.releaseLock(); } catch (e) {} }
       }
       if (本次发送首包) 已通过代理发送首包 = true;
       remoteConnWrapper.socket = newSocket;
@@ -3841,6 +3853,83 @@ function isSpeedTestSite(hostname) {
 }
 
 ///////////////////////////////////////////////////////SOCKS5/HTTP函数///////////////////////////////////////////////
+/**
+ * 通过已建立的上游连接，经落地代理转发到目标服务器（第二跳代理）
+ * @param {string} targetHost - 最终目标主机名
+ * @param {string} targetPort - 最终目标端口
+ * @param {ArrayBuffer|Uint8Array|null} initialData - 首包数据
+ * @param {string} type - 落地代理类型 (socks5/http/https)
+ * @param {Object} proxy - 落地代理配置 {hostname, port, username, password}
+ * @param {Function} TCP连接 - TCP连接器函数
+ */
+async function 通过上游连接落地代理(targetHost, targetPort, initialData, type, proxy, TCP连接) {
+  const upstreamSocket = TCP连接({ hostname: proxy.hostname, port: proxy.port });
+  const writer = upstreamSocket.writable.getWriter();
+  const reader = upstreamSocket.readable.getReader();
+
+  try {
+    if (type === "socks5") {
+      const { username, password } = proxy;
+      const authMethods = username && password
+        ? new Uint8Array([0x05, 0x02, 0x00, 0x02])
+        : new Uint8Array([0x05, 0x01, 0x00]);
+      await writer.write(authMethods);
+      let response = await reader.read();
+      if (response.done || response.value.byteLength < 2)
+        throw new Error("落地SOCKS5方法选择失败");
+      const selectedMethod = new Uint8Array(response.value)[1];
+      if (selectedMethod === 0x02) {
+        if (!username || !password) throw new Error("落地SOCKS5需要认证");
+        const userBytes = new TextEncoder().encode(username);
+        const passBytes = new TextEncoder().encode(password);
+        const authPacket = new Uint8Array([0x01, userBytes.length, ...userBytes, passBytes.length, ...passBytes]);
+        await writer.write(authPacket);
+        response = await reader.read();
+        if (response.done || new Uint8Array(response.value)[1] !== 0x00)
+          throw new Error("落地SOCKS5认证失败");
+      } else if (selectedMethod !== 0x00) {
+        throw new Error(`落地SOCKS5不支持的认证方式: ${selectedMethod}`);
+      }
+      const hostBytes = new TextEncoder().encode(targetHost);
+      const connectPacket = new Uint8Array([0x05, 0x01, 0x00, 0x03, hostBytes.length, ...hostBytes, targetPort >> 8, targetPort & 0xff]);
+      await writer.write(connectPacket);
+      response = await reader.read();
+      if (response.done || new Uint8Array(response.value)[1] !== 0x00)
+        throw new Error("落地SOCKS5连接失败");
+    } else if (type === "http" || type === "https") {
+      const { username, password } = proxy;
+      const auth = username && password
+        ? `Proxy-Authorization: Basic ${btoa(`${username}:${password}`)}\r\n`
+        : "";
+      const connectRequest = `CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n${auth}Connection: close\r\n\r\n`;
+      await writer.write(new TextEncoder().encode(connectRequest));
+      let buffer = "";
+      const decoder = new TextDecoder();
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("落地HTTP代理响应不完整");
+        buffer += decoder.decode(chunk.value, { stream: true });
+        if (buffer.includes("\r\n\r\n")) break;
+      }
+      const statusMatch = buffer.match(/HTTP\/\d\.\d\s+(\d+)/);
+      const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+      if (statusCode < 200 || statusCode >= 300)
+        throw new Error(`落地HTTP代理拒绝连接: ${buffer.split("\r\n")[0]}`);
+    }
+    if (有效数据长度(initialData) > 0) {
+      await writer.write(数据转Uint8Array(initialData));
+    }
+    writer.releaseLock();
+    reader.releaseLock();
+    return upstreamSocket;
+  } catch (error) {
+    try { writer.releaseLock(); } catch (e) {}
+    try { reader.releaseLock(); } catch (e) {}
+    try { upstreamSocket.close(); } catch (e) {}
+    throw error;
+  }
+}
+
 async function socks5Connect(targetHost, targetPort, initialData, TCP连接) {
   const { username, password, hostname, port } = parsedSocks5Address;
   const socket = TCP连接({ hostname, port }),
@@ -9298,6 +9387,72 @@ async function 反代参数获取(url, uuid) {
     console.error("解析SOCKS5地址失败:", err.message);
     启用SOCKS5反代 = null;
   }
+
+  // 解析落地代理参数（第二跳代理）
+  const 落地代理值 =
+    searchParams.get("landing") ||
+    searchParams.get("landing_proxy") ||
+    searchParams.get("lp") ||
+    null;
+  let 落地代理原始值 = 落地代理值;
+  if (!落地代理原始值) {
+    const 路径落地匹配 = /\/landing[=\/]([^?#\s]+)/i.exec(pathname);
+    if (路径落地匹配) 落地代理原始值 = 路径落地匹配[1];
+  }
+  if (落地代理原始值) {
+    try {
+      const 落地解析 = 解析落地代理地址(落地代理原始值);
+      落地代理 = 落地解析.type;
+      parsed落地代理 = {
+        username: 落地解析.username || "",
+        password: 落地解析.password || "",
+        hostname: 落地解析.hostname,
+        port: Number(落地解析.port),
+      };
+      log(
+        `[落地代理] 已配置第二跳: ${落地代理}://${落地解析.username ? "***:***@" : ""}${落地解析.hostname}:${落地解析.port}`,
+      );
+    } catch (err) {
+      console.error("解析落地代理地址失败:", err.message);
+    }
+  }
+}
+
+function 解析落地代理地址(值) {
+  const 匹配 = /^(socks5|http|https):\/\/(.+)$/i.exec(值 || "");
+  if (!匹配) throw new Error("落地代理格式错误，需以 socks5://、http:// 或 https:// 开头");
+  const type = 匹配[1].toLowerCase();
+  const 地址部分 = 匹配[2].split("/")[0];
+  const at索引 = 地址部分.lastIndexOf("@");
+  let username = "",
+    password = "",
+    hostPort部分 = 地址部分;
+  if (at索引 > -1) {
+    const 认证部分 = 地址部分.slice(0, at索引);
+    hostPort部分 = 地址部分.slice(at索引 + 1);
+    const 冒号索引 = 认证部分.indexOf(":");
+    if (冒号索引 > -1) {
+      username = 认证部分.slice(0, 冒号索引);
+      password = 认证部分.slice(冒号索引 + 1);
+    } else {
+      username = 认证部分;
+    }
+  }
+  const 最后冒号 = hostPort部分.lastIndexOf(":");
+  let hostname, port;
+  if (最后冒号 > -1 && !hostPort部分.startsWith("[") && hostPort部分.includes(":")) {
+    hostname = hostPort部分.slice(0, 最后冒号);
+    port = hostPort部分.slice(最后冒号 + 1);
+  } else if (hostPort部分.startsWith("[") && hostPort部分.includes("]:")) {
+    const 右括号索引 = hostPort部分.indexOf("]:");
+    hostname = hostPort部分.slice(1, 右括号索引);
+    port = hostPort部分.slice(右括号索引 + 2);
+  } else {
+    hostname = hostPort部分;
+    port = 反代协议默认端口[type] || 80;
+  }
+  if (!hostname) throw new Error("落地代理缺少 hostname");
+  return { type, username, password, hostname, port };
 }
 
 const 反代协议默认端口 = {
