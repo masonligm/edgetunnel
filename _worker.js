@@ -42,9 +42,12 @@ export default {
         ? 请求URL文本
         : 请求URL文本.slice(0, 请求URL锚点索引);
     if (!请求URL主体部分.includes("?") && /%3f/i.test(请求URL主体部分)) {
-      const 请求URL锚点部分 =
-        请求URL锚点索引 === -1 ? "" : 请求URL文本.slice(请求URL锚点索引);
-      请求URL文本 = 请求URL主体部分.replace(/%3f/i, "?") + 请求URL锚点部分;
+      // 避免对 VLESS 路径编码 (/?landing=...) 进行替换，否则会导致 URL 解析错误
+      if (!/%2[fF]%3[fF]/i.test(请求URL主体部分)) {
+        const 请求URL锚点部分 =
+          请求URL锚点索引 === -1 ? "" : 请求URL文本.slice(请求URL锚点索引);
+        请求URL文本 = 请求URL主体部分.replace(/%3f/i, "?") + 请求URL锚点部分;
+      }
     }
     const url = new URL(请求URL文本);
     const UA = request.headers.get("User-Agent") || "null";
@@ -3269,9 +3272,20 @@ async function forwardataTCP(
       const 第一跳目标主机 = 落地代理有效 ? parsed落地代理.hostname : host;
       const 第一跳目标端口 = 落地代理有效 ? parsed落地代理.port : portNum;
       if (落地代理有效) {
-        log(`[落地代理] 链路: CF Worker → 第一跳(${启用SOCKS5反代 || "proxyip"}) → 落地代理(${落地代理}://${parsed落地代理.hostname}:${parsed落地代理.port}) → 目标(${host}:${portNum})`);
+        const 第一跳描述 = 启用SOCKS5反代 ? 启用SOCKS5反代 : "直连";
+        log(`[落地代理] 链路: CF Worker → 第一跳(${第一跳描述}) → 落地代理(${落地代理}://${parsed落地代理.hostname}:${parsed落地代理.port}) → 目标(${host}:${portNum})`);
       }
-      if (启用SOCKS5反代 === "socks5") {
+      // 如果有落地代理，第一跳直连落地代理服务器（proxyip 反向代理无法正确转发 SOCKS5 协议）
+      if (落地代理有效) {
+        log(`[落地代理] 直连落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+        newSocket = await 打开TCP连接(parsed落地代理.hostname, parsed落地代理.port);
+        log(`[落地代理] 经第二跳 ${落地代理} 代理到目标: ${host}:${portNum}`);
+        newSocket = await 通过上游连接落地代理(
+          host, portNum, 本次首包数据,
+          落地代理, parsed落地代理,
+          newSocket,
+        );
+      } else if (启用SOCKS5反代 === "socks5") {
         log(`[SOCKS5代理] 代理到: ${第一跳目标主机}:${第一跳目标端口}`);
         newSocket = await socks5Connect(第一跳目标主机, 第一跳目标端口, null, TCP连接);
       } else if (启用SOCKS5反代 === "http") {
@@ -3296,7 +3310,7 @@ async function forwardataTCP(
           第一跳目标端口,
           TCP连接,
         );
-        if (!落地代理有效 && 有效数据长度(本次首包数据) > 0) {
+        if (有效数据长度(本次首包数据) > 0) {
           const writer = newSocket.writable.getWriter();
           try { await writer.write(数据转Uint8Array(本次首包数据)); }
           finally { try { writer.releaseLock(); } catch (e) {} }
@@ -3309,7 +3323,7 @@ async function forwardataTCP(
           第一跳目标端口,
           TCP连接,
         );
-        if (!落地代理有效 && 有效数据长度(本次首包数据) > 0) {
+        if (有效数据长度(本次首包数据) > 0) {
           const writer = newSocket.writable.getWriter();
           try { await writer.write(数据转Uint8Array(本次首包数据)); }
           finally { try { writer.releaseLock(); } catch (e) {} }
@@ -3325,15 +3339,7 @@ async function forwardataTCP(
           启用反代兜底,
         );
       }
-      // 如果有落地代理，通过已建立的连接进行第二跳转发
-      if (落地代理有效) {
-        log(`[落地代理] 经第二跳 ${落地代理} 代理到目标: ${host}:${portNum}`);
-        newSocket = await 通过上游连接落地代理(
-          host, portNum, 本次首包数据,
-          落地代理, parsed落地代理,
-          () => newSocket,
-        );
-      } else if (本次发送首包 && 有效数据长度(本次首包数据) > 0) {
+      if (本次发送首包 && 有效数据长度(本次首包数据) > 0 && !落地代理有效) {
         const writer = newSocket.writable.getWriter();
         try { await writer.write(数据转Uint8Array(本次首包数据)); }
         finally { try { writer.releaseLock(); } catch (e) {} }
@@ -3878,10 +3884,9 @@ function isSpeedTestSite(hostname) {
  * @param {ArrayBuffer|Uint8Array|null} initialData - 首包数据
  * @param {string} type - 落地代理类型 (socks5/http/https)
  * @param {Object} proxy - 落地代理配置 {hostname, port, username, password}
- * @param {Function} TCP连接 - TCP连接器函数
+ * @param {Object} upstreamSocket - 已建立的上游连接 socket（通过 proxyip 或首跳代理连接落地代理服务器）
  */
-async function 通过上游连接落地代理(targetHost, targetPort, initialData, type, proxy, TCP连接) {
-  const upstreamSocket = TCP连接({ hostname: proxy.hostname, port: proxy.port });
+async function 通过上游连接落地代理(targetHost, targetPort, initialData, type, proxy, upstreamSocket) {
   const writer = upstreamSocket.writable.getWriter();
   const reader = upstreamSocket.readable.getReader();
 
@@ -9351,11 +9356,17 @@ async function 反代参数获取(url, uuid) {
   };
 
   // 先解析落地代理参数，避免路径匹配错误捕获落地代理 URL 中的协议前缀
-  const 落地代理值 =
+  let 落地代理值 =
     searchParams.get("landing") ||
     searchParams.get("landing_proxy") ||
     searchParams.get("lp") ||
     null;
+  // 处理完全编码的 URL 情况 (如 /%2F%3Flanding%3Dsocks5%3A...)
+  // 解码后的 pathname 可能包含嵌入式查询字符串 (如 //?landing=...)
+  if (!落地代理值 && pathname.includes("?")) {
+    const 嵌入查询匹配 = /\?landing=([^&\s#]+)/i.exec(pathname);
+    if (嵌入查询匹配) 落地代理值 = decodeURIComponent(嵌入查询匹配[1]);
+  }
   let 落地代理原始值 = 落地代理值;
   const 有落地代理 = !!落地代理原始值;
   if (!落地代理原始值) {
