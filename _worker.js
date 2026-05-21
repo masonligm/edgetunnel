@@ -9350,10 +9350,42 @@ async function 反代参数获取(url, uuid) {
       : 值;
   };
 
+  // 先解析落地代理参数，避免路径匹配错误捕获落地代理 URL 中的协议前缀
+  const 落地代理值 =
+    searchParams.get("landing") ||
+    searchParams.get("landing_proxy") ||
+    searchParams.get("lp") ||
+    null;
+  let 落地代理原始值 = 落地代理值;
+  const 有落地代理 = !!落地代理原始值;
+  if (!落地代理原始值) {
+    const 路径落地匹配 = /\/landing[=\/]([^?#\s]+)/i.exec(pathname);
+    if (路径落地匹配) 落地代理原始值 = 路径落地匹配[1];
+  }
+  订阅落地代理 = 落地代理原始值 || "";
+  if (落地代理原始值) {
+    try {
+      const 落地解析 = 解析落地代理地址(落地代理原始值);
+      落地代理 = 落地解析.type;
+      parsed落地代理 = {
+        username: 落地解析.username || "",
+        password: 落地解析.password || "",
+        hostname: 落地解析.hostname,
+        port: Number(落地解析.port),
+      };
+      log(
+        `[落地代理] 已配置第二跳: ${落地代理}://${落地解析.username ? "***:***@" : ""}${落地解析.hostname}:${落地解析.port}`,
+      );
+    } catch (err) {
+      console.error("解析落地代理地址失败:", err.message);
+    }
+  }
+
   const 查询反代IP = searchParams.get("proxyip");
   if (查询反代IP !== null) {
     if (!解析代理URL(查询反代IP)) return 设置反代IP(查询反代IP);
-  } else {
+  } else if (!有落地代理) {
+    // 有落地代理时跳过路径匹配，避免将落地代理 URL 中的 socks5:// 等误识别为首跳代理
     let 匹配 = /\/(socks5?|http|https|turn|sstp):\/?\/?([^/?#\s]+)/i.exec(
       pathname,
     );
@@ -9406,35 +9438,6 @@ async function 反代参数获取(url, uuid) {
     启用SOCKS5反代 = null;
   }
 
-  // 解析落地代理参数（第二跳代理）
-  const 落地代理值 =
-    searchParams.get("landing") ||
-    searchParams.get("landing_proxy") ||
-    searchParams.get("lp") ||
-    null;
-  let 落地代理原始值 = 落地代理值;
-  if (!落地代理原始值) {
-    const 路径落地匹配 = /\/landing[=\/]([^?#\s]+)/i.exec(pathname);
-    if (路径落地匹配) 落地代理原始值 = 路径落地匹配[1];
-  }
-  订阅落地代理 = 落地代理原始值 || "";
-  if (落地代理原始值) {
-    try {
-      const 落地解析 = 解析落地代理地址(落地代理原始值);
-      落地代理 = 落地解析.type;
-      parsed落地代理 = {
-        username: 落地解析.username || "",
-        password: 落地解析.password || "",
-        hostname: 落地解析.hostname,
-        port: Number(落地解析.port),
-      };
-      log(
-        `[落地代理] 已配置第二跳: ${落地代理}://${落地解析.username ? "***:***@" : ""}${落地解析.hostname}:${落地解析.port}`,
-      );
-    } catch (err) {
-      console.error("解析落地代理地址失败:", err.message);
-    }
-  }
 }
 
 function 解析落地代理地址(值) {
