@@ -12,6 +12,7 @@ let 缓存SOCKS5白名单 = null,
   启用反代兜底 = true,
   落地代理 = null,
   parsed落地代理 = {},
+  订阅落地代理 = "",
   调试日志打印 = false;
 let SOCKS5白名单 = [
   "*tapecontent.net",
@@ -778,6 +779,9 @@ export default {
               UA.toLowerCase().includes(
                 "tunnel (https://github.com/cmliu/edge",
               );
+          // 从订阅请求 URL 中提取落地代理参数
+          const 落地代理值 = url.searchParams.get("landing") || url.searchParams.get("landing_proxy") || url.searchParams.get("lp") || "";
+          订阅落地代理 = 落地代理值;
           const 请求TOKEN = url.searchParams.get("token");
           const 用户客户端请求订阅 = 请求TOKEN === 订阅TOKEN;
           const 当前日序号 = Math.floor(Date.now() / 86400000);
@@ -1047,6 +1051,13 @@ export default {
                             "/",
                           ) + (config_JSON.启用0RTT ? "?ed=2560" : "");
                     }
+                    // 如果订阅请求携带落地代理参数，将其编码到节点路径中
+                    if (订阅落地代理) {
+                      const 落地参数 = `&landing=${encodeURIComponent(订阅落地代理)}`;
+                      完整节点路径 = 完整节点路径.includes("?")
+                        ? 完整节点路径 + 落地参数
+                        : 完整节点路径 + "?" + 落地参数.slice(1);
+                    }
                     if (isLoonOrSurge)
                       完整节点路径 = 完整节点路径.replace(/,/g, "%2C");
 
@@ -1083,7 +1094,8 @@ export default {
                   .join("\n");
             } else {
               // 订阅转换
-              const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=${订阅类型}&url=${encodeURIComponent(url.protocol + "//" + url.host + "/sub?target=mixed&token=" + 今日订阅转换后端专属TOKEN + "&asOrg=" + 识别运营商(request) + (url.searchParams.has("sub") && url.searchParams.get("sub") != "" ? `&sub=${url.searchParams.get("sub")}` : ""))}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&scv=${config_JSON.跳过证书验证}`;
+              const 订阅落地代理参数 = 订阅落地代理 ? `&landing=${encodeURIComponent(订阅落地代理)}` : "";
+              const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=${订阅类型}&url=${encodeURIComponent(url.protocol + "//" + url.host + "/sub?target=mixed&token=" + 今日订阅转换后端专属TOKEN + "&asOrg=" + 识别运营商(request) + (url.searchParams.has("sub") && url.searchParams.get("sub") != "" ? `&sub=${url.searchParams.get("sub")}` : "") + 订阅落地代理参数)}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&scv=${config_JSON.跳过证书验证}`;
               try {
                 const response = await fetch(订阅转换URL, {
                   headers: {
@@ -3359,17 +3371,23 @@ async function forwardataTCP(
       throw err;
     }
   } else {
-    try {
-      log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
-      const initialSocket = await connectDirect(host, portNum, rawData);
-      remoteConnWrapper.socket = initialSocket;
-      connectStreams(initialSocket, ws, respHeader, async () => {
-        if (remoteConnWrapper.socket !== initialSocket) return;
-        await connecttoPry();
-      });
-    } catch (err) {
-      log(`[TCP转发] 直连 ${host}:${portNum} 失败: ${err.message}`);
+    // 如果有落地代理，必须通过 connecttoPry 走落地代理链路，禁止直连绕过
+    if (落地代理 && parsed落地代理.hostname) {
+      log(`[TCP转发] 检测到落地代理，跳过直连，走代理链路`);
       await connecttoPry();
+    } else {
+      try {
+        log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
+        const initialSocket = await connectDirect(host, portNum, rawData);
+        remoteConnWrapper.socket = initialSocket;
+        connectStreams(initialSocket, ws, respHeader, async () => {
+          if (remoteConnWrapper.socket !== initialSocket) return;
+          await connecttoPry();
+        });
+      } catch (err) {
+        log(`[TCP转发] 直连 ${host}:${portNum} 失败: ${err.message}`);
+        await connecttoPry();
+      }
     }
   }
 }
@@ -9399,6 +9417,7 @@ async function 反代参数获取(url, uuid) {
     const 路径落地匹配 = /\/landing[=\/]([^?#\s]+)/i.exec(pathname);
     if (路径落地匹配) 落地代理原始值 = 路径落地匹配[1];
   }
+  订阅落地代理 = 落地代理原始值 || "";
   if (落地代理原始值) {
     try {
       const 落地解析 = 解析落地代理地址(落地代理原始值);
