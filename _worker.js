@@ -832,7 +832,21 @@ export default {
                 "tunnel (https://github.com/cmliu/edge",
               );
           // 从订阅请求 URL 中提取落地代理参数
-          const 落地代理值 = url.searchParams.get("landing") || url.searchParams.get("landing_proxy") || url.searchParams.get("lp") || "";
+          let 落地代理值 = "";
+          const 加密落地代理 = url.searchParams.get("lp");
+          if (加密落地代理) {
+            try {
+              落地代理值 = base64SecretDecode(加密落地代理, userID);
+            } catch {
+              // 解密失败则忽略该参数，继续尝试明文参数
+            }
+          }
+          if (!落地代理值) {
+            落地代理值 =
+              url.searchParams.get("landing") ||
+              url.searchParams.get("landing_proxy") ||
+              "";
+          }
           订阅落地代理 = 落地代理值;
           const 请求TOKEN = url.searchParams.get("token");
           const 用户客户端请求订阅 = 请求TOKEN === 订阅TOKEN;
@@ -1103,13 +1117,20 @@ export default {
                             "/",
                           ) + (config_JSON.启用0RTT ? "?ed=2560" : "");
                     }
-                    // 如果订阅请求携带落地代理参数，将其编码到节点路径中
+                    // 如果订阅请求携带落地代理参数，加密后嵌入到节点路径中
                     if (订阅落地代理) {
-                      const 落地参数 = `&landing=${encodeURIComponent(订阅落地代理)}`;
+                      const 加密落地代理 = encodeURIComponent(base64SecretEncode(订阅落地代理, userID));
+                      const 落地参数 = `&lp=${加密落地代理}`;
                       完整节点路径 = 完整节点路径.includes("?")
                         ? 完整节点路径 + 落地参数
                         : 完整节点路径 + "?" + 落地参数.slice(1);
                     }
+                    // 加密节点路径中的首跳代理凭据（如 /socks5://user:pass@host:port → /ep/加密值）
+                    // String.replace 只替换匹配部分，匹配后的查询参数自动保留，无需在回调中处理
+                    完整节点路径 = 完整节点路径.replace(
+                      /\/(socks5|http|https|turn|sstp):\/\/[^/?&\s]+/i,
+                      (匹配项) => "/ep/" + base64SecretEncode(匹配项.slice(1), userID)
+                    );
                     if (isLoonOrSurge)
                       完整节点路径 = 完整节点路径.replace(/,/g, "%2C");
 
@@ -1145,9 +1166,8 @@ export default {
                   .filter((item) => item !== null)
                   .join("\n");
             } else {
-              // 订阅转换
-              const 订阅落地代理参数 = 订阅落地代理 ? `&landing=${encodeURIComponent(订阅落地代理)}` : "";
-              const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=${订阅类型}&url=${encodeURIComponent(url.protocol + "//" + url.host + "/sub?target=mixed&token=" + 今日订阅转换后端专属TOKEN + "&asOrg=" + 识别运营商(request) + (url.searchParams.has("sub") && url.searchParams.get("sub") != "" ? `&sub=${url.searchParams.get("sub")}` : "") + 订阅落地代理参数)}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&scv=${config_JSON.跳过证书验证}`;
+              // 订阅转换（落地代理已通过加密 lp= 参数嵌入节点路径，无需单独传递）
+              const 订阅转换URL = `${config_JSON.订阅转换配置.SUBAPI}/sub?target=${订阅类型}&url=${encodeURIComponent(url.protocol + "//" + url.host + "/sub?target=mixed&token=" + 今日订阅转换后端专属TOKEN + "&asOrg=" + 识别运营商(request) + (url.searchParams.has("sub") && url.searchParams.get("sub") != "" ? `&sub=${url.searchParams.get("sub")}` : ""))}&config=${encodeURIComponent(config_JSON.订阅转换配置.SUBCONFIG)}&emoji=${config_JSON.订阅转换配置.SUBEMOJI}&scv=${config_JSON.跳过证书验证}`;
               try {
                 const response = await fetch(订阅转换URL, {
                   headers: {
@@ -3324,10 +3344,31 @@ async function forwardataTCP(
         const 第一跳描述 = 启用SOCKS5反代 ? 启用SOCKS5反代 : "直连";
         log(`[落地代理] 链路: CF Worker → 第一跳(${第一跳描述}) → 落地代理(${落地代理}://${parsed落地代理.hostname}:${parsed落地代理.port}) → 目标(${host}:${portNum})`);
       }
-      // 如果有落地代理，第一跳直连落地代理服务器（proxyip 反向代理无法正确转发 SOCKS5 协议）
+      // 如果有落地代理，先通过首跳代理（如果有）连接到落地代理服务器，再经落地代理转发到目标
+      // 注：proxyip 反向代理无法正确转发 SOCKS5/HTTP 协议，所以首跳为 proxyip 时直连落地代理
       if (落地代理有效) {
-        log(`[落地代理] 直连落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
-        newSocket = await 打开TCP连接(parsed落地代理.hostname, parsed落地代理.port);
+        if (启用SOCKS5反代 === "socks5") {
+          log(`[落地代理] 经首跳 SOCKS5 → 落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+          newSocket = await socks5Connect(parsed落地代理.hostname, parsed落地代理.port, null, TCP连接);
+        } else if (启用SOCKS5反代 === "http") {
+          log(`[落地代理] 经首跳 HTTP → 落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+          newSocket = await httpConnect(parsed落地代理.hostname, parsed落地代理.port, null, false, TCP连接);
+        } else if (启用SOCKS5反代 === "https") {
+          log(`[落地代理] 经首跳 HTTPS → 落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+          newSocket = isIPHostname(parsedSocks5Address.hostname)
+            ? await httpsConnect(parsed落地代理.hostname, parsed落地代理.port, null, TCP连接)
+            : await httpConnect(parsed落地代理.hostname, parsed落地代理.port, null, true, TCP连接);
+        } else if (启用SOCKS5反代 === "turn") {
+          log(`[落地代理] 经首跳 TURN → 落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+          newSocket = await turnConnect(parsedSocks5Address, parsed落地代理.hostname, parsed落地代理.port, TCP连接);
+        } else if (启用SOCKS5反代 === "sstp") {
+          log(`[落地代理] 经首跳 SSTP → 落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+          newSocket = await sstpConnect(parsedSocks5Address, parsed落地代理.hostname, parsed落地代理.port, TCP连接);
+        } else {
+          // 首跳为 proxyip 或无代理，直连落地代理（proxyip 反向代理无法正确转发 SOCKS5/HTTP 协议）
+          log(`[落地代理] 直连落地代理: ${parsed落地代理.hostname}:${parsed落地代理.port}`);
+          newSocket = await 打开TCP连接(parsed落地代理.hostname, parsed落地代理.port);
+        }
         log(`[落地代理] 经第二跳 ${落地代理} 代理到目标: ${host}:${portNum}`);
         newSocket = await 通过上游连接落地代理(
           host, portNum, 本次首包数据,
@@ -3942,22 +3983,31 @@ async function 通过上游连接落地代理(targetHost, targetPort, initialDat
   try {
     if (type === "socks5") {
       const { username, password } = proxy;
+      const readUntil = async (minBytes) => {
+        let buffer = new Uint8Array(0);
+        let bytesRead = 0;
+        while (bytesRead < minBytes) {
+          const response = await reader.read();
+          if (response.done) throw new Error("落地SOCKS5连接意外关闭");
+          buffer = 拼接字节数据(buffer, new Uint8Array(response.value));
+          bytesRead = buffer.byteLength;
+        }
+        return buffer;
+      };
       const authMethods = username && password
         ? new Uint8Array([0x05, 0x02, 0x00, 0x02])
         : new Uint8Array([0x05, 0x01, 0x00]);
       await writer.write(authMethods);
-      let response = await reader.read();
-      if (response.done || response.value.byteLength < 2)
-        throw new Error("落地SOCKS5方法选择失败");
-      const selectedMethod = new Uint8Array(response.value)[1];
+      const methodResponse = await readUntil(2);
+      const selectedMethod = methodResponse[1];
       if (selectedMethod === 0x02) {
         if (!username || !password) throw new Error("落地SOCKS5需要认证");
         const userBytes = new TextEncoder().encode(username);
         const passBytes = new TextEncoder().encode(password);
         const authPacket = new Uint8Array([0x01, userBytes.length, ...userBytes, passBytes.length, ...passBytes]);
         await writer.write(authPacket);
-        response = await reader.read();
-        if (response.done || new Uint8Array(response.value)[1] !== 0x00)
+        const authResponse = await readUntil(2);
+        if (authResponse[1] !== 0x00)
           throw new Error("落地SOCKS5认证失败");
       } else if (selectedMethod !== 0x00) {
         throw new Error(`落地SOCKS5不支持的认证方式: ${selectedMethod}`);
@@ -3965,8 +4015,8 @@ async function 通过上游连接落地代理(targetHost, targetPort, initialDat
       const hostBytes = new TextEncoder().encode(targetHost);
       const connectPacket = new Uint8Array([0x05, 0x01, 0x00, 0x03, hostBytes.length, ...hostBytes, targetPort >> 8, targetPort & 0xff]);
       await writer.write(connectPacket);
-      response = await reader.read();
-      if (response.done || new Uint8Array(response.value)[1] !== 0x00)
+      const connectResponse = await readUntil(5);
+      if (connectResponse[1] !== 0x00)
         throw new Error("落地SOCKS5连接失败");
     } else if (type === "http" || type === "https") {
       const { username, password } = proxy;
@@ -4007,17 +4057,25 @@ async function socks5Connect(targetHost, targetPort, initialData, TCP连接) {
   const socket = TCP连接({ hostname, port }),
     writer = socket.writable.getWriter(),
     reader = socket.readable.getReader();
+  const readUntil = async (minBytes) => {
+    let buffer = new Uint8Array(0);
+    let bytesRead = 0;
+    while (bytesRead < minBytes) {
+      const response = await reader.read();
+      if (response.done) throw new Error("SOCKS5 连接意外关闭");
+      buffer = 拼接字节数据(buffer, new Uint8Array(response.value));
+      bytesRead = buffer.byteLength;
+    }
+    return buffer;
+  };
   try {
     const authMethods =
       username && password
         ? new Uint8Array([0x05, 0x02, 0x00, 0x02])
         : new Uint8Array([0x05, 0x01, 0x00]);
     await writer.write(authMethods);
-    let response = await reader.read();
-    if (response.done || response.value.byteLength < 2)
-      throw new Error("S5 method selection failed");
-
-    const selectedMethod = new Uint8Array(response.value)[1];
+    const methodResponse = await readUntil(2);
+    const selectedMethod = methodResponse[1];
     if (selectedMethod === 0x02) {
       if (!username || !password) throw new Error("S5 requires authentication");
       const userBytes = new TextEncoder().encode(username),
@@ -4030,8 +4088,8 @@ async function socks5Connect(targetHost, targetPort, initialData, TCP连接) {
         ...passBytes,
       ]);
       await writer.write(authPacket);
-      response = await reader.read();
-      if (response.done || new Uint8Array(response.value)[1] !== 0x00)
+      const authResponse = await readUntil(2);
+      if (authResponse[1] !== 0x00)
         throw new Error("S5 authentication failed");
     } else if (selectedMethod !== 0x00)
       throw new Error(`S5 unsupported auth method: ${selectedMethod}`);
@@ -4048,8 +4106,8 @@ async function socks5Connect(targetHost, targetPort, initialData, TCP连接) {
       targetPort & 0xff,
     ]);
     await writer.write(connectPacket);
-    response = await reader.read();
-    if (response.done || new Uint8Array(response.value)[1] !== 0x00)
+    const connectResponse = await readUntil(5);
+    if (connectResponse[1] !== 0x00)
       throw new Error("S5 connection failed");
 
     if (有效数据长度(initialData) > 0) await writer.write(initialData);
@@ -8793,6 +8851,11 @@ async function 读取config_JSON(
     路径字段名,
     域名字段名,
   } = 获取传输协议配置(config_JSON);
+  // 加密节点路径中的首跳代理凭据（如 /socks5://user:pass@host:port → /ep/加密值）
+  config_JSON.完整节点路径 = config_JSON.完整节点路径.replace(
+    /\/(socks5|http|https|turn|sstp):\/\/[^/?&\s]+/i,
+    (匹配项) => "/ep/" + base64SecretEncode(匹配项.slice(1), userID)
+  );
   const 传输路径参数值 = 获取传输路径参数值(
     config_JSON,
     config_JSON.完整节点路径,
@@ -9426,11 +9489,23 @@ async function 反代参数获取(url, uuid, env = null) {
   };
 
   // 先解析落地代理参数，避免路径匹配错误捕获落地代理 URL 中的协议前缀
-  let 落地代理值 =
-    searchParams.get("landing") ||
-    searchParams.get("landing_proxy") ||
-    searchParams.get("lp") ||
-    null;
+  // 优先解密加密的 lp= 参数（base64SecretEncode 编码，密钥为 userID）
+  let 落地代理值 = null;
+  const 加密落地代理 = searchParams.get("lp");
+  if (加密落地代理) {
+    try {
+      落地代理值 = base64SecretDecode(加密落地代理, uuid);
+    } catch {
+      // 解密失败则忽略该参数
+    }
+  }
+  // 向后兼容：明文 landing= / landing_proxy= 参数
+  if (!落地代理值) {
+    落地代理值 =
+      searchParams.get("landing") ||
+      searchParams.get("landing_proxy") ||
+      null;
+  }
   // 处理完全编码的 URL 情况 (如 /%2F%3Flanding%3Dsocks5%3A...)
   // 解码后的 pathname 可能包含嵌入式查询字符串 (如 //?landing=...)
   if (!落地代理值 && pathname.includes("?")) {
@@ -9467,11 +9542,26 @@ async function 反代参数获取(url, uuid, env = null) {
     }
   }
 
+  // 优先尝试解密加密的首跳代理路径（/ep/ 格式，base64SecretEncode 编码，密钥为 uuid）
+  const 加密首跳代理匹配 = /\/ep\/([^/?&\s]+)/i.exec(pathname);
+  if (加密首跳代理匹配) {
+    try {
+      const 解密首跳代理 = base64SecretDecode(加密首跳代理匹配[1], uuid);
+      if (解析代理URL(解密首跳代理)) {
+        // 解析成功，已设置 启用SOCKS5反代、我的SOCKS5账号、启用SOCKS5全局反代
+      }
+    } catch {
+      // 解密失败则继续尝试明文路径匹配
+    }
+  }
+
   const 查询反代IP = searchParams.get("proxyip");
   if (查询反代IP !== null) {
     if (!解析代理URL(查询反代IP)) return 设置反代IP(查询反代IP);
-  } else if (!有落地代理) {
-    // 有落地代理时跳过路径匹配，避免将落地代理 URL 中的 socks5:// 等误识别为首跳代理
+  } else if (!我的SOCKS5账号) {
+    // 仅在未设置首跳代理时进行路径匹配
+    // 注意：落地代理已通过 lp=/landing= 参数优先解析（第9415-9462行），
+    // 路径匹配不会将落地代理 URL 中的协议前缀误识别为首跳代理
     let 匹配 = /\/(socks5?|http|https|turn|sstp):\/?\/?([^/?#\s]+)/i.exec(
       pathname,
     );
