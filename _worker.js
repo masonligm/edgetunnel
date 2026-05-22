@@ -126,7 +126,7 @@ export default {
       );
     } else if (管理员密码 && upgradeHeader === "websocket") {
       // WebSocket代理
-      await 反代参数获取(url, userID);
+      await 反代参数获取(url, userID, env);
       log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
       return await 处理WS请求(request, userID, url);
     } else if (
@@ -136,7 +136,7 @@ export default {
       request.method === "POST"
     ) {
       // gRPC/XHTTP代理
-      await 反代参数获取(url, userID);
+      await 反代参数获取(url, userID, env);
       const referer = request.headers.get("Referer") || "";
       const 命中XHTTP特征 =
         referer.includes("x_padding", 14) || referer.includes("x_padding=");
@@ -719,6 +719,47 @@ export default {
                   },
                 );
               }
+            } else if (区分大小写访问路径 === "admin/landing.json") {
+              // 保存落地代理URL配置
+              try {
+                const landingConfig = await request.json();
+                if (landingConfig.init && landingConfig.init === true) {
+                  await env.KV.put("landing.json", JSON.stringify({ 启用: false, 配置列表: [], 当前选中: null }, null, 2));
+                } else {
+                  await env.KV.put("landing.json", JSON.stringify(landingConfig, null, 2));
+                }
+                ctx.waitUntil(
+                  请求日志记录(
+                    env,
+                    request,
+                    访问IP,
+                    "Save_Landing_Config",
+                    config_JSON,
+                  ),
+                );
+                return new Response(
+                  JSON.stringify({ success: true, message: "落地代理配置已保存" }),
+                  {
+                    status: 200,
+                    headers: {
+                      "Content-Type": "application/json;charset=utf-8",
+                    },
+                  },
+                );
+              } catch (error) {
+                console.error("保存落地代理配置失败:", error);
+                return new Response(
+                  JSON.stringify({
+                    error: "保存落地代理配置失败: " + error.message,
+                  }),
+                  {
+                    status: 500,
+                    headers: {
+                      "Content-Type": "application/json;charset=utf-8",
+                    },
+                  },
+                );
+              }
             } else
               return new Response(
                 JSON.stringify({ error: "不支持的POST请求路径" }),
@@ -754,6 +795,14 @@ export default {
           } else if (访问路径 === "admin/cf.json") {
             // CF配置文件
             return new Response(JSON.stringify(request.cf, null, 2), {
+              status: 200,
+              headers: { "Content-Type": "application/json;charset=utf-8" },
+            });
+          } else if (区分大小写访问路径 === "admin/landing.json") {
+            // 获取落地代理URL配置
+            const landingJSON = await env.KV.get("landing.json");
+            const landingConfig = landingJSON ? JSON.parse(landingJSON) : { 启用: false, 配置列表: [], 当前选中: null };
+            return new Response(JSON.stringify(landingConfig, null, 2), {
               status: 200,
               headers: { "Content-Type": "application/json;charset=utf-8" },
             });
@@ -8597,6 +8646,11 @@ async function 读取config_JSON(
           max: 100000,
         },
       },
+      落地代理URL: {
+        启用: false,
+        配置列表: [],
+        当前选中: null,
+      },
     };
 
   try {
@@ -9281,10 +9335,26 @@ async function 请求优选API(urls, 默认端口 = "443", 超时时间 = 3000) 
   ];
 }
 
-async function 反代参数获取(url, uuid) {
+async function 反代参数获取(url, uuid, env = null) {
   const { searchParams } = url;
   const pathname = decodeURIComponent(url.pathname);
   const pathLower = pathname.toLowerCase();
+
+  // 从KV读取落地代理配置
+  let landingProxyConfig = null;
+  if (env && env.KV) {
+    try {
+      const landingJSON = await env.KV.get("landing.json");
+      if (landingJSON) {
+        landingProxyConfig = JSON.parse(landingJSON);
+        if (landingProxyConfig && landingProxyConfig.启用 && landingProxyConfig.当前选中) {
+          log(`[落地代理] 已从配置启用落地代理: ${landingProxyConfig.当前选中}`);
+        }
+      }
+    } catch (err) {
+      console.error("读取落地代理配置失败:", err.message);
+    }
+  }
 
   const 链式代理路径匹配 = pathname.match(/\/video\/(.+)$/i);
   if (链式代理路径匹配) {
@@ -9372,6 +9442,11 @@ async function 反代参数获取(url, uuid) {
   if (!落地代理原始值) {
     const 路径落地匹配 = /\/landing[=\/]([^?#\s]+)/i.exec(pathname);
     if (路径落地匹配) 落地代理原始值 = 路径落地匹配[1];
+  }
+  // 如果URL中没有落地代理，且KV中配置了落地代理，则使用KV中的配置
+  if (!落地代理原始值 && landingProxyConfig && landingProxyConfig.启用 && landingProxyConfig.当前选中) {
+    落地代理原始值 = landingProxyConfig.当前选中;
+    log(`[落地代理] 使用KV配置的落地代理: ${落地代理原始值}`);
   }
   订阅落地代理 = 落地代理原始值 || "";
   if (落地代理原始值) {
