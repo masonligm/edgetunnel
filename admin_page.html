@@ -8094,6 +8094,19 @@
                             </div>
                         </div>
                     </div>
+                    <!-- Token 管理 -->
+                    <div class="form-group" style="margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,0.1);">
+                        <label>Token 管理</label>
+                        <div class="input-wrapper subscription-link-wrapper">
+                            <input type="text" id="currentToken" title="当前 Token" readonly style="font-family: monospace;">
+                            <div class="btn-container">
+                                <button type="button" class="btn btn-secondary" onclick="copyToken()" style="font-size:12px;">复制 Token</button>
+                                <button type="button" class="btn btn-primary" onclick="updateToken()" style="font-size:12px;">更新 Token</button>
+                                <button type="button" class="btn btn-qrcode" onclick="resetToken()" style="font-size:12px;">重置默认</button>
+                            </div>
+                        </div>
+                        <div style="margin-top:4px;font-size:11px;color:#64748b;">更新 Token 后旧链接将失效，请重新复制订阅链接</div>
+                    </div>
                 </div>
             </div>
 
@@ -12012,6 +12025,9 @@ vless://7b102311-43fd-4e8f-977e-8090623c101d@edt-pages.github.io:443?security=tl
 
             // 检查当前域名是否在 HOSTS 数组中
             checkHostsMismatch();
+
+            // 更新 Token 显示
+            updateTokenDisplay();
         }
 
         // CF 使用情况显示函数
@@ -13183,6 +13199,80 @@ vless://7b102311-43fd-4e8f-977e-8090623c101d@edt-pages.github.io:443?security=tl
             }).catch(() => {
                 showToast('复制失败', 'error');
             });
+        }
+
+        // Token 管理
+        function copyToken() {
+            const token = document.getElementById('currentToken').value;
+            navigator.clipboard.writeText(token).then(() => {
+                showToast('📋 Token 已复制', 'success');
+            }).catch(() => {
+                showToast('复制失败', 'error');
+            });
+        }
+
+        async function updateToken() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '更新中...';
+            try {
+                // 生成随机 Token
+                const array = new Uint8Array(16);
+                crypto.getRandomValues(array);
+                const newToken = Array.from(array, b => b.toString(16).padStart(2, '0')).join('');
+
+                const res = await fetch('/admin/updateToken', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: newToken })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('✅ Token 已更新，请重新复制订阅链接', 'success');
+                    // 刷新页面配置
+                    await loadConfig();
+                    updateTokenDisplay();
+                } else {
+                    showToast('更新失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('更新失败: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '更新 Token';
+            }
+        }
+
+        async function resetToken() {
+            if (!confirm('确定要重置 Token 为默认值吗？')) return;
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '重置中...';
+            try {
+                const res = await fetch('/admin/resetToken', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const data = await res.json();
+                if (data.success) {
+                    showToast('✅ Token 已重置为默认', 'success');
+                    await loadConfig();
+                    updateTokenDisplay();
+                } else {
+                    showToast('重置失败: ' + (data.error || '未知错误'), 'error');
+                }
+            } catch (e) {
+                showToast('重置失败: ' + e.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '重置默认';
+            }
+        }
+
+        function updateTokenDisplay() {
+            const token = currentConfig.优选订阅生成?.TOKEN || '';
+            document.getElementById('currentToken').value = token;
         }
 
         function handleTLSFragmentChange(type) {
