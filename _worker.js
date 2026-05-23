@@ -55,26 +55,34 @@ const HTML_LANDING_B64 = "H4sIAAAAAAAACu1de5MbxbX/n0/RCAdJRo+R9uFd7WqNMebCLQdc2E
 
 
 async function 域名匹配黑名单(hostname, 黑名单字符串) {
-  // 如果已直接提供黑名单字符串，直接匹配（向后兼容）
+  // 优先级1：已直接提供黑名单字符串（向后兼容）
   if (黑名单字符串) {
+    log(`[黑名单] 使用直接传入的黑名单字符串: "${黑名单字符串}"`);
     return 执行黑名单匹配(hostname, 黑名单字符串);
   }
-  // 否则从 KV 实时读取，通过元数据版本判断是否需要刷新缓存
+  // 优先级2：使用反代参数获取函数已加载的全局黑名单（无需额外 KV 读取）
+  if (KV落地代理黑名单) {
+    log(`[黑名单] 使用全局变量 KV落地代理黑名单: "${KV落地代理黑名单}"`);
+    const 匹配结果 = 执行黑名单匹配(hostname, KV落地代理黑名单);
+    log(`[黑名单] 域名 ${hostname} 匹配结果: ${匹配结果}`);
+    return 匹配结果;
+  }
+  // 优先级3：从 KV 实时读取（兜底逻辑，正常情况下不应走到这里）
   if (!CF环境 || !CF环境.KV) {
     log(`[黑名单] CF环境或KV未初始化，跳过检查`);
     return false;
   }
-  log(`[黑名单] 开始检查: 域名=${hostname}, CF环境.KV=${!!CF环境.KV}`);
+  log(`[黑名单] 兜底KV读取: 域名=${hostname}`);
   try {
     const { metadata } = await CF环境.KV.getWithMetadata("landing.json");
     const 当前版本 = metadata ? metadata.modification_time || 0 : 0;
-    log(`[黑名单] KV元数据版本: ${当前版本}, 缓存版本: ${黑名单缓存版本}, 缓存值: "${黑名单缓存值}"`);
+    log(`[黑名单] KV元数据版本: ${当前版本}, 缓存版本: ${黑名单缓存版本}`);
     if (当前版本 !== 黑名单缓存版本) {
       const 最新数据 = await CF环境.KV.get("landing.json");
       const 解析结果 = 最新数据 ? JSON.parse(最新数据) : null;
       黑名单缓存值 = 解析结果 ? (解析结果.黑名单 || "") : "";
       黑名单缓存版本 = 当前版本;
-      log(`[黑名单] 已刷新缓存，黑名单="${黑名单缓存值}", 原始数据: ${最新数据 ? 最新数据.substring(0, 200) : "null"}`);
+      log(`[黑名单] 已刷新缓存，黑名单="${黑名单缓存值}"`);
     }
     const 匹配结果 = 执行黑名单匹配(hostname, 黑名单缓存值);
     log(`[黑名单] 域名 ${hostname} 匹配结果: ${匹配结果}`);
@@ -89,7 +97,7 @@ function 执行黑名单匹配(hostname, 黑名单字符串) {
   if (!黑名单字符串) return false;
   const 规则列表 = 黑名单字符串.split(",").map(s => s.trim()).filter(Boolean);
   for (const 规则 of 规则列表) {
-    const 正则模式 = "^" + 规则.replace(/\./g, "\\.").replace(/\*/g, ".+") + "$";
+    const 正则模式 = "^" + 规则.replace(/\./g, "\\.").replace(/\*/g, "(?:.+\\.)?") + "$";
     if (new RegExp(正则模式, "i").test(hostname)) return true;
   }
   return false;
@@ -813,6 +821,9 @@ export default {
                     throw new Error("KV写入验证失败：写入黑名单=\"" + 待保存数据.黑名单 + "\"，回读=\"" + (二次解析 ? 二次解析.黑名单 : "null") + "\"");
                   }
                 }
+                // KV 写入成功后，主动刷新全局缓存，避免同一 Worker 实例命中旧缓存
+                黑名单缓存值 = 待保存数据.黑名单 || "";
+                黑名单缓存版本 = 0;
                 ctx.waitUntil(
                   请求日志记录(
                     env,
@@ -3501,12 +3512,16 @@ async function forwardataTCP(
       let newSocket;
       // 如果配置了落地代理，第一跳连接到落地代理服务器
       const 命中落地代理黑名单 = await 域名匹配黑名单(host);
+      log(`[黑名单决策] 目标域名: ${host} | 黑名单命中: ${命中落地代理黑名单} | 落地代理: ${落地代理 || "无"} | 解析主机: ${parsed落地代理.hostname || "无"}`);
       const 落地代理有效 = 落地代理 && parsed落地代理.hostname && !命中落地代理黑名单;
+      log(`[黑名单决策] 落地代理有效: ${落地代理有效} | 原因: ${命中落地代理黑名单 ? "命中黑名单跳过落地代理" : 落地代理 ? "正常走落地代理链路" : "未配置落地代理"}`);
       const 第一跳目标主机 = 落地代理有效 ? parsed落地代理.hostname : host;
       const 第一跳目标端口 = 落地代理有效 ? parsed落地代理.port : portNum;
       if (落地代理有效) {
         const 第一跳描述 = 启用SOCKS5反代 ? 启用SOCKS5反代 : "直连";
         log(`[落地代理] 链路: CF Worker → 第一跳(${第一跳描述}) → 落地代理(${落地代理}://${parsed落地代理.hostname}:${parsed落地代理.port}) → 目标(${host}:${portNum})`);
+      } else if (命中落地代理黑名单) {
+        log(`[落地代理] 目标 ${host} 命中黑名单，跳过落地代理，直连目标`);
       }
       // 如果有落地代理，先通过首跳代理（如果有）连接到落地代理服务器，再经落地代理转发到目标
       // 注：proxyip 反向代理无法正确转发 SOCKS5/HTTP 协议，所以首跳为 proxyip 时直连落地代理
@@ -3633,12 +3648,15 @@ async function forwardataTCP(
   } else {
     // 如果有落地代理，必须通过 connecttoPry 走落地代理链路，禁止直连绕过
     const 命中TCP黑名单 = await 域名匹配黑名单(host);
+    log(`[TCP转发黑名单决策] 目标: ${host}:${portNum} | 黑名单命中: ${命中TCP黑名单} | 落地代理: ${落地代理 || "无"} | 解析主机: ${parsed落地代理.hostname || "无"}`);
     if (落地代理 && parsed落地代理.hostname && !命中TCP黑名单) {
       log(`[TCP转发] 检测到落地代理，跳过直连，走代理链路`);
       await connecttoPry();
     } else {
       if (命中TCP黑名单) {
         log(`[TCP转发] 目标 ${host} 命中落地代理黑名单，跳过落地代理走直连`);
+      } else if (!落地代理 || !parsed落地代理.hostname) {
+        log(`[TCP转发] 未配置落地代理，走直连`);
       }
       try {
         log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
@@ -9588,8 +9606,10 @@ async function 反代参数获取(url, uuid, env = null) {
   }
   if (landingProxyConfig && landingProxyConfig.黑名单) {
     KV落地代理黑名单 = landingProxyConfig.黑名单;
+    log(`[黑名单加载] 已从KV加载黑名单: "${KV落地代理黑名单}"`);
   } else {
     KV落地代理黑名单 = "";
+    log(`[黑名单加载] KV中无黑名单配置（${landingProxyConfig ? "landing.json存在但无黑名单字段" : "landing.json不存在或解析失败"}）`);
   }
 
   const 链式代理路径匹配 = pathname.match(/\/video\/(.+)$/i);
