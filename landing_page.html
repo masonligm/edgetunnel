@@ -484,6 +484,7 @@
         async function saveConfig() {
             config.启用 = document.getElementById('enableToggle').checked;
             config.黑名单 = document.getElementById('blacklist').value.trim();
+            console.log('[DEBUG] saveConfig 发送数据:', JSON.stringify(config, null, 2));
             try {
                 const res = await fetch('/admin/landing.json', {
                     method: 'POST',
@@ -491,19 +492,24 @@
                     body: JSON.stringify(config),
                     credentials: 'same-origin'
                 });
+                console.log('[DEBUG] saveConfig 响应状态:', res.status);
+                console.log('[DEBUG] saveConfig 响应类型:', res.headers.get('content-type'));
                 // 检查响应内容类型，非 JSON 说明认证被重定向到了登录页
                 const contentType = res.headers.get('content-type');
                 if (!contentType || !contentType.includes('application/json')) {
+                    const htmlText = await res.text().catch(() => '<无法读取>');
+                    console.error('[DEBUG] 非JSON响应内容:', htmlText.substring(0, 500));
                     throw new Error('认证已过期，请重新登录');
                 }
-                if (!res.ok) {
-                    const errData = await res.json().catch(() => ({}));
-                    throw new Error(errData.error || `HTTP ${res.status}`);
-                }
                 const data = await res.json();
+                console.log('[DEBUG] saveConfig 响应体:', JSON.stringify(data));
+                if (!res.ok) {
+                    throw new Error(data.error || `HTTP ${res.status}`);
+                }
                 if (!data.success) {
                     throw new Error(data.error || '保存失败');
                 }
+                console.log('[DEBUG] saveConfig 保存成功');
             } catch (e) {
                 console.error('保存失败:', e);
                 showToast('保存失败: ' + e.message, 'error');
