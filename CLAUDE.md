@@ -18,9 +18,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Architecture
 
 ### Entry Point
-- **`_worker.js`** (~365KB, ~10,000 lines): Single-file Cloudflare Worker containing all logic
+- **`_worker.js`** (~580KB, ~10,243 lines): Single-file Cloudflare Worker containing all logic
+- **`wrangler.toml`**: Wrangler CLI config (name = "v20251104", compatibility_date = "2025-11-04")
 - **Version string**: Line 1 shows last build timestamp
-- **Main export**: `export default { async fetch(request, env, ctx) }`
+- **Main export**: `export default { async fetch(request, env, ctx) }` at line 109
 
 ### Request Routing Logic
 The `fetch()` function routes requests based on these patterns (in order):
@@ -94,7 +95,7 @@ Client → [CF Worker] → First Hop → Landing Proxy (optional) → Target
 
 **KV Storage:**
 - Variable name must be `KV` (required binding)
-- Stores: `config_JSON` (configuration), `log.json` (request logs)
+- Stores: `config_JSON` (configuration), `log.json` (request logs), `landing.json` (landing proxy config)
 
 **Subscription Formats:**
 - Clash (Meta/Mihomo compatible)
@@ -126,27 +127,51 @@ Client → [CF Worker] → First Hop → Landing Proxy (optional) → Target
 | `ADD.txt` | Custom preferred IPs | Plain text (one per line) |
 | `log.json` | Request/response logs | JSON array |
 
+### Landing Proxy Node Data Structure
+Each node in `配置列表` has the following structure:
+```json
+{
+  "名称": "Proxy1",
+  "URL": "socks5://user:pass@host:port",
+  "Selected": false
+}
+```
+- **`Selected`**: Boolean flag synchronized with `当前选中`. When a node is selected, its `Selected` is `true` and all others are `false`. The `当前选中` field stores the selected node's `URL` string.
+- **Backward compatibility**: Old data without `Selected` field is handled by `renderNodes()` which recalculates it from `当前选中`.
+
 ### Landing Proxy URL Configuration
 The landing proxy (second hop) can be configured via:
 1. **URL Parameter**: `/?landing=socks5://user:pass@host:port`
 2. **KV Configuration**: Stored in `landing.json` with structure:
    ```json
    {
-     "启用": true,
+     "启用": false,
      "配置列表": [
        {
          "名称": "Proxy1",
-         "URL": "socks5://user:pass@host:port"
+         "URL": "socks5://user:pass@host:port",
+         "Selected": false
        }
      ],
-     "当前选中": "socks5://user:pass@host:port"
+     "当前选中": "",
+     "黑名单": ""
    }
    ```
+   - **`启用`**: Boolean, defaults to `false`. Cannot be set to `true` if `配置列表` is empty (toggle is disabled + toast prompt).
+   - **`当前选中`**: String, stores the URL of the currently selected node. Defaults to `""` (empty string, not `null`).
+   - **`黑名单`**: String, comma-separated wildcard patterns for domains to bypass landing proxy (e.g., `*example.com,*.test.org`). Supports `*` wildcard matching.
 3. **Admin API**: `GET/POST /admin/landing.json`
 
 **Supported Protocols**: SOCKS5, HTTP, HTTPS, TURN, SSTP
 
 **Priority Order**: URL parameter > KV configuration > None
+
+### Landing Proxy Node CRUD Operations
+- **Add Node**: Frontend form fills protocol + address + name → `addNode()` → pushes to `配置列表` → auto-selects first node → `saveConfig()` writes to KV.
+- **Edit Node**: `editNode(idx)` loads node data into form → form switches to "保存修改" mode → `saveNodeEdit(idx)` updates node in place → `saveConfig()` writes to KV.
+- **Delete Node**: `deleteNode(idx)` removes node → if deleted node was selected, auto-selects first remaining node → `saveConfig()` writes to KV.
+- **Select Node**: `selectNode(idx)` updates `当前选中` and syncs `Selected` flags → `saveConfig()` writes to KV.
+- **Toggle Enable/Disable**: Enable switch is disabled when `配置列表` is empty. Attempting to enable without nodes shows a toast prompt.
 
 ### SOCKS5 Whitelist (Default)
 The following domains are pre-configured for SOCKS5 routing:
@@ -184,9 +209,16 @@ The following domains are pre-configured for SOCKS5 routing:
 
 ### Code Organization
 - Single-file architecture with ~100 functions
-- Global state variables at top (lines 2-23)
-- Constants defined after globals (lines 26-34)
-- Main `fetch()` entry point at line 37
+- Global state variables: lines 2-20 (e.g., `反代IP`, `启用SOCKS5反代`, `落地代理`, `CF环境`)
+- Constants: lines 21-107 (e.g., `SOCKS5白名单`, `WS早期数据最大字节`, `TCP并发拨号数`)
+- Embedded HTML pages: lines 50-54 (gzip+base64 B64 constants)
+- Main `fetch()` entry point: line 109
+- Protocol parsers: `解析魏烈思请求()` (~line 2958), `解析木马请求()` (~line 2835), `解析SS请求()` (inline)
+- Transport handlers: `处理WS请求()` (~line 2202), `处理gRPC请求()` (~line 1823), `处理XHTTP请求()` (~line 1443)
+- Proxy connectors: `socks5Connect()` (~line 4152), `httpConnect()` (~line 4228), `httpsConnect()` (~line 4328), `turnConnect()` (~line 6301), `sstpConnect()` (~line 6647)
+- `TlsClient` class: line 5296
+- Subscription generators: `Clash订阅配置文件热补丁()` (~line 7333), `Singbox订阅配置文件热补丁()` (~line 7602), `Surge订阅配置文件热补丁()` (~line 8060)
+- Configuration: `读取config_JSON()` (~line 8698)
 
 ### Security Considerations
 - No API key storage in code (uses environment variables)
@@ -235,24 +267,35 @@ edgetunnel/
 ├── README.md           # User documentation
 ├── LICENSE             # MIT License
 ├── CHANGELOG           # Version history
-├── wrangler.toml       # Wrangler CLI config (optional)
+├── wrangler.toml       # Wrangler CLI config (name = "v20251104", compatibility_date = "2025-11-04")
 ├── img.png             # Admin panel screenshot
 ├── .gitignore          # Git ignore rules
-└── .github/            # GitHub workflows
+├── .github/            # GitHub workflows (Auto-close-empty-PRs.yml, sync.yml)
+└── .vscode/            # VS Code settings
 ```
 
-## Testing
+## Development
 
 ### Local Development
-- Use `wrangler dev` for local testing
-- Set `ADMIN` environment variable locally
-- Bind local KV namespace
+```bash
+# Start local dev server (requires wrangler CLI)
+npx wrangler dev
 
-### Integration Testing
-- Test WebSocket upgrade with VLESS/Trojan/SS clients
-- Verify admin panel authentication flow
-- Check subscription generation for each format
-- Test proxy chain routing
+# Deploy to Cloudflare Workers
+npx wrangler deploy
+```
+- Set `ADMIN` environment variable locally via `wrangler.toml` or `.dev.vars`
+- KV namespace binding requires uncommenting `[[kv_namespaces]]` in `wrangler.toml` and providing a KV ID
+
+### Embedded HTML Page Workflow
+The admin panel, login, landing, and error pages are embedded as gzip-compressed base64 strings in `_worker.js` (lines 50-54). To modify:
+```js
+// Decode
+const html = new TextDecoder().decode(pako.ungzip(atob(B64_STRING)));
+// Edit html, then re-encode:
+const b64 = btoa(String.fromCharCode(...pako.gzip(new TextEncoder().encode(html))));
+```
+Constants: `HTML_LOGIN_B64`, `HTML_NOADMIN_B64`, `HTML_NOKV_B64`, `HTML_ADMIN_B64`, `HTML_LANDING_B64`
 
 ## Troubleshooting
 
