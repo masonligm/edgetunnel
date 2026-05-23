@@ -1024,7 +1024,7 @@ export default {
             }
           }
           const 请求TOKEN = url.searchParams.get("token");
-          const 用户客户端请求订阅 = 请求TOKEN === 订阅TOKEN || (自定义TOKEN && 请求TOKEN === 自定义TOKEN);
+          const 用户客户端请求订阅 = 自定义TOKEN ? 请求TOKEN === 自定义TOKEN : 请求TOKEN === 订阅TOKEN;
           const 当前日序号 = Math.floor(Date.now() / 86400000);
           const 订阅转换后端TOKEN种子 = base64SecretEncode(订阅TOKEN, userID);
           const [今日订阅转换后端专属TOKEN, 昨日订阅转换后端专属TOKEN] =
