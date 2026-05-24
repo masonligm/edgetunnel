@@ -142,17 +142,53 @@
             <div class="form-row">
                 <div class="form-group" style="flex: 0 0 140px">
                     <label>协议</label>
-                    <select id="protocol">
+                    <select id="protocol" onchange="onProtocolChange()">
                         <option value="socks5">socks5</option>
                         <option value="http">http</option>
                         <option value="https">https</option>
                         <option value="turn">turn</option>
                         <option value="sstp">sstp</option>
+                        <option value="vless">vless</option>
                     </select>
                 </div>
                 <div class="form-group" style="flex: 2">
                     <label>地址 (user:pass@host:port 或 host:port)</label>
                     <input type="text" id="proxyAddr" placeholder="user:password@127.0.0.1:1080" oninput="onAddrInput()">
+                </div>
+            </div>
+            <!-- VLESS 专属字段 -->
+            <div id="vlessFields" style="display:none">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>UUID</label>
+                        <input type="text" id="vlessUuid" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group" style="flex:2">
+                        <label>WebSocket 路径</label>
+                        <input type="text" id="vlessPath" placeholder="/vless-ws-path">
+                    </div>
+                    <div class="form-group" style="flex:1">
+                        <label>SNI</label>
+                        <input type="text" id="vlessSni" placeholder="域名（留空使用地址中的host）">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>安全</label>
+                        <select id="vlessSecurity">
+                            <option value="none">none</option>
+                            <option value="tls">tls</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>传输协议 (network)</label>
+                        <select id="vlessTransportType">
+                            <option value="ws">ws</option>
+                            <option value="tcp">tcp</option>
+                        </select>
+                    </div>
                 </div>
             </div>
             <div class="form-row">
@@ -271,7 +307,30 @@
         }
 
         function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-        function maskUrl(url) { const i = url.indexOf('@'); return i > 0 ? url.substring(0, url.indexOf(':', i > 0 ? url.indexOf(':') : 0)) + ':***@' + url.substring(i + 1) : url; }
+        function maskUrl(url) {
+            // VLESS: hide UUID in vless://UUID@host:port?...
+            const vm = url.match(/^vless:\/\/([^@]+)@(.+)$/i);
+            if (vm) return 'vless://****@' + vm[2];
+            const i = url.indexOf('@');
+            return i > 0 ? url.substring(0, url.indexOf(':', i > 0 ? url.indexOf(':') : 0)) + ':***@' + url.substring(i + 1) : url;
+        }
+
+        // Protocol change - show/hide VLESS fields
+        function onProtocolChange() {
+            const proto = document.getElementById('protocol').value;
+            const vlessFields = document.getElementById('vlessFields');
+            const addrInput = document.getElementById('proxyAddr');
+            const addrLabel = addrInput.previousElementSibling;
+            if (proto === 'vless') {
+                vlessFields.style.display = 'block';
+                addrLabel.textContent = '地址 (host:port)';
+                addrInput.placeholder = 'example.com:443';
+            } else {
+                vlessFields.style.display = 'none';
+                addrLabel.textContent = '地址 (user:pass@host:port 或 host:port)';
+                addrInput.placeholder = 'user:password@127.0.0.1:1080';
+            }
+        }
 
         // Address input
         function onAddrInput() {
@@ -284,6 +343,38 @@
             const protocol = document.getElementById('protocol').value;
             const addr = document.getElementById('proxyAddr').value.trim();
             if (!addr) { showStatus('请输入代理地址', 'error'); return; }
+            if (protocol === 'vless') {
+                const uuid = document.getElementById('vlessUuid').value.trim();
+                const wsPath = document.getElementById('vlessPath').value.trim() || '/';
+                const sni = document.getElementById('vlessSni').value.trim() || '';
+                if (!uuid) { showStatus('请输入 UUID', 'error'); return; }
+                showStatus('验证中...', 'info');
+                document.getElementById('btnVerify').disabled = true;
+                try {
+                    const params = new URLSearchParams();
+                    params.append('vless', addr);
+                    params.append('vless_uuid', uuid);
+                    if (wsPath) params.append('vless_path', wsPath);
+                    if (sni) params.append('vless_sni', sni);
+                    params.append('vless_security', document.getElementById('vlessSecurity').value);
+                    params.append('vless_transport_type', document.getElementById('vlessTransportType').value);
+                    const controller = new AbortController();
+                    const tid = setTimeout(() => controller.abort(), 15000);
+                    const res = await fetch(`/admin/check?${params}&_t=${Date.now()}`, { signal: controller.signal });
+                    clearTimeout(tid);
+                    const data = await res.json();
+                    if (!data.hasOwnProperty('success')) { showStatus('后端版本过旧，请升级 edgetunnel', 'error'); return; }
+                    if (data.success === false) { showStatus('代理无效: ' + (data.error || '未知错误'), 'error'); return; }
+                    verifiedProtocol = protocol;
+                    verifiedAddress = addr;
+                    showStatus('验证通过! IP: ' + (data.ip || '未知') + ' | 位置: ' + (data.loc || '未知') + ' | 延迟: ' + (data.responseTime || 0) + 'ms', 'success');
+                } catch (e) {
+                    showStatus('验证失败: ' + e.message, 'error');
+                } finally {
+                    document.getElementById('btnVerify').disabled = !document.getElementById('proxyAddr').value.trim();
+                }
+                return;
+            }
             showStatus('验证中...', 'info');
             document.getElementById('btnVerify').disabled = true;
 
@@ -319,6 +410,13 @@
             try {
                 const params = new URLSearchParams();
                 params.append(parts.protocol, parts.address);
+                if (parts.protocol === 'vless') {
+                    params.append('vless_uuid', parts.uuid);
+                    params.append('vless_path', parts.path);
+                    if (parts.sni) params.append('vless_sni', parts.sni);
+                    params.append('vless_security', parts.security || 'tls');
+                    params.append('vless_transport_type', parts.transportType || 'ws');
+                }
                 const controller = new AbortController();
                 const tid = setTimeout(() => controller.abort(), 15000);
                 const res = await fetch(`/admin/check?${params}&_t=${Date.now()}`, { signal: controller.signal });
@@ -335,6 +433,26 @@
         }
 
         function parseLandingUrl(url) {
+            // VLESS: vless://UUID@host:port?security=tls&type=ws&path=/path&sni=xxx#name
+            const vm = url.match(/^vless:\/\/([^@]+)@([^:/?#]+)(?::(\d+))?(\/[^?#]*)?(?:\?([^#]*))?(?:#(.*))?$/i);
+            if (vm) {
+                const params = {};
+                if (vm[5]) {
+                    vm[5].split('&').forEach(kv => { const [k, v] = kv.split('='); params[k] = decodeURIComponent(v || ''); });
+                }
+                return {
+                    protocol: 'vless',
+                    address: vm[2] + ':' + (vm[3] || '443'),
+                    uuid: vm[1],
+                    host: vm[2],
+                    port: vm[3] || '443',
+                    path: vm[4] || params.path || '/',
+                    sni: params.sni || vm[2],
+                    fp: params.fp || 'chrome',
+                    security: params.security || 'tls',
+                    transportType: params.type || 'ws'
+                };
+            }
             const m = url.match(/^(socks5|http|https|turn|sstp):\/\/(.+)$/i);
             if (!m) return null;
             return { protocol: m[1].toLowerCase(), address: m[2] };
@@ -348,7 +466,25 @@
 
             if (!addr) { showStatus('请输入代理地址', 'error'); return; }
 
-            const fullUrl = protocol + '://' + addr;
+            let fullUrl;
+            if (protocol === 'vless') {
+                const uuid = document.getElementById('vlessUuid').value.trim();
+                const wsPath = document.getElementById('vlessPath').value.trim() || '/';
+                const sni = document.getElementById('vlessSni').value.trim() || '';
+                const security = document.getElementById('vlessSecurity').value;
+                const transportType = document.getElementById('vlessTransportType').value;
+                if (!uuid) { showStatus('请输入 UUID', 'error'); return; }
+                const parts = addr.split(':');
+                const host = parts[0];
+                const port = parts[1] || '443';
+                fullUrl = 'vless://' + uuid + '@' + host + ':' + port
+                    + '?security=' + security + '&type=' + transportType
+                    + (transportType === 'ws' ? '&path=' + encodeURIComponent(wsPath) : '&headerType=none')
+                    + (sni ? '&sni=' + encodeURIComponent(sni) : '')
+                    + (transportType === 'ws' ? '&fp=chrome' : '');
+            } else {
+                fullUrl = protocol + '://' + addr;
+            }
 
             // Check duplicate
             if (config.配置列表.some(n => n.URL === fullUrl)) {
@@ -370,6 +506,9 @@
                 showStatus('已添加: ' + node.名称, 'success');
                 document.getElementById('proxyAddr').value = '';
                 document.getElementById('nodeName').value = '';
+                document.getElementById('vlessUuid').value = '';
+                document.getElementById('vlessPath').value = '';
+                document.getElementById('vlessSni').value = '';
                 verifiedProtocol = '';
                 verifiedAddress = '';
                 showToast('节点已添加', 'success');
@@ -377,6 +516,10 @@
         }
 
         function buildName(addr, protocol) {
+            if (protocol === 'vless') {
+                const host = addr.split(':')[0];
+                return ('VLESS ' + host).substring(0, 20);
+            }
             const p = parseLandingUrl(protocol + '://' + addr);
             const host = p ? p.address.split('@').pop().split(':')[0] : addr;
             return (protocol.toUpperCase() + ' ' + host).substring(0, 20);
@@ -407,6 +550,22 @@
             document.getElementById('nodeName').value = node.名称;
             document.getElementById('btnVerify').disabled = false;
 
+            // Handle VLESS fields
+            if (parts.protocol === 'vless') {
+                document.getElementById('vlessUuid').value = parts.uuid || '';
+                document.getElementById('vlessPath').value = parts.path || '/';
+                document.getElementById('vlessSni').value = parts.sni || '';
+                document.getElementById('vlessSecurity').value = parts.security || 'tls';
+                document.getElementById('vlessTransportType').value = parts.transportType || 'ws';
+            } else {
+                document.getElementById('vlessUuid').value = '';
+                document.getElementById('vlessPath').value = '';
+                document.getElementById('vlessSni').value = '';
+                document.getElementById('vlessSecurity').value = 'none';
+                document.getElementById('vlessTransportType').value = 'ws';
+            }
+            onProtocolChange();
+
             // Change add button to edit button temporarily
             const btnAdd = document.getElementById('btnAdd');
             btnAdd.textContent = '保存修改';
@@ -425,7 +584,25 @@
 
             if (!addr) { showStatus('请输入代理地址', 'error'); return; }
 
-            const fullUrl = protocol + '://' + addr;
+            let fullUrl;
+            if (protocol === 'vless') {
+                const uuid = document.getElementById('vlessUuid').value.trim();
+                const wsPath = document.getElementById('vlessPath').value.trim() || '/';
+                const sni = document.getElementById('vlessSni').value.trim() || '';
+                const security = document.getElementById('vlessSecurity').value;
+                const transportType = document.getElementById('vlessTransportType').value;
+                if (!uuid) { showStatus('请输入 UUID', 'error'); return; }
+                const parts = addr.split(':');
+                const host = parts[0];
+                const port = parts[1] || '443';
+                fullUrl = 'vless://' + uuid + '@' + host + ':' + port
+                    + '?security=' + security + '&type=' + transportType
+                    + (transportType === 'ws' ? '&path=' + encodeURIComponent(wsPath) : '&headerType=none')
+                    + (sni ? '&sni=' + encodeURIComponent(sni) : '')
+                    + (transportType === 'ws' ? '&fp=chrome' : '');
+            } else {
+                fullUrl = protocol + '://' + addr;
+            }
             const oldUrl = config.配置列表[idx].URL;
             const wasSelected = config.配置列表[idx].Selected;
 
@@ -451,6 +628,9 @@
             // Reset form
             document.getElementById('proxyAddr').value = '';
             document.getElementById('nodeName').value = '';
+            document.getElementById('vlessUuid').value = '';
+            document.getElementById('vlessPath').value = '';
+            document.getElementById('vlessSni').value = '';
             const btnAdd = document.getElementById('btnAdd');
             btnAdd.textContent = '添加节点';
             btnAdd.onclick = addNode;
@@ -466,6 +646,7 @@
             if (!confirm('确定删除节点 "' + node.名称 + '"?')) return;
 
             const wasSelected = node.Selected;
+            const isLastNode = config.配置列表.length === 1;
             config.配置列表.splice(idx, 1);
 
             if (wasSelected && config.配置列表.length > 0) {
@@ -475,15 +656,27 @@
                 config.当前选中 = "";
             }
 
+            // 删除最后一个节点时自动关闭启用开关
+            if (isLastNode && config.启用) {
+                config.启用 = false;
+                document.getElementById('enableToggle').checked = false;
+            }
+
             await saveConfig();
             renderNodes();
             showToast('节点已删除', 'info');
         }
 
-        // Save
+        // Save — returns the saved config from server response, or null on failure
         async function saveConfig() {
-            config.启用 = document.getElementById('enableToggle').checked;
             config.黑名单 = document.getElementById('blacklist').value.trim();
+            // 节点列表为空时，强制关闭启用状态
+            if (config.配置列表.length === 0) {
+                config.启用 = false;
+                document.getElementById('enableToggle').checked = false;
+            } else {
+                config.启用 = document.getElementById('enableToggle').checked;
+            }
             console.log('[DEBUG] saveConfig 发送数据:', JSON.stringify(config, null, 2));
             try {
                 const res = await fetch('/admin/landing.json', {
@@ -510,9 +703,24 @@
                     throw new Error(data.error || '保存失败');
                 }
                 console.log('[DEBUG] saveConfig 保存成功');
+                // 用服务端返回的数据更新本地 config，确保与 KV 一致
+                if (data.config) {
+                    config.启用 = data.config.启用;
+                    config.配置列表 = Array.isArray(data.config.配置列表) ? data.config.配置列表 : config.配置列表;
+                    config.当前选中 = data.config.当前选中 || config.当前选中;
+                    config.黑名单 = data.config.黑名单 || config.黑名单;
+                    // 确保所有节点有 Selected 字段
+                    config.配置列表.forEach(node => {
+                        if (node.Selected === undefined) {
+                            node.Selected = (config.当前选中 === node.URL);
+                        }
+                    });
+                }
+                return data.config || null;
             } catch (e) {
                 console.error('保存失败:', e);
                 showToast('保存失败: ' + e.message, 'error');
+                return null;
             }
         }
 
@@ -531,7 +739,18 @@
                 if (!res.ok) throw new Error('HTTP ' + res.status);
                 const data = await res.json();
                 console.log('黑名单保存结果:', data);
-                config.黑名单 = val;
+                // 用服务端返回的数据更新本地 config
+                if (data.config) {
+                    config.启用 = data.config.启用;
+                    config.配置列表 = Array.isArray(data.config.配置列表) ? data.config.配置列表 : config.配置列表;
+                    config.当前选中 = data.config.当前选中 || config.当前选中;
+                    config.黑名单 = data.config.黑名单 || config.黑名单;
+                    config.配置列表.forEach(node => {
+                        if (node.Selected === undefined) {
+                            node.Selected = (config.当前选中 === node.URL);
+                        }
+                    });
+                }
                 showToast('黑名单已更新', 'success');
             } catch (e) {
                 console.error('保存黑名单失败:', e);
