@@ -10440,6 +10440,10 @@ async function 反代参数获取(url, uuid, env = null) {
     } catch (err) {
       console.error("解析落地代理地址失败:", err.message);
     }
+  } else {
+    // 无落地代理时（含全局开关关闭、URL无参数、黑名单命中），必须清空全局变量，避免同一 isolate 上残留上一次请求的落地代理值
+    落地代理 = null;
+    parsed落地代理 = {};
   }
 
   // 优先尝试解密加密的首跳代理路径（/ep/ 格式，base64SecretEncode 编码，密钥为 uuid）
