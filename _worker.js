@@ -3357,6 +3357,25 @@ async function SSAEAD解密(cryptoKey, nonceCounter, ciphertext) {
   return new Uint8Array(pt);
 }
 
+// 连接路由决策（纯函数，可单测）：返回 true 表示必须经反代链路(connecttoPry)，false 表示允许直连优先。
+// 关键修复：当配置了 PROXYIP/链式代理(启用反代兜底=false)时，禁止裸直连真实目标，杜绝出口 IP 泄漏。
+export function 应走代理链路({
+  启用SOCKS5反代,
+  启用SOCKS5全局反代,
+  命中SOCKS5白名单,
+  落地代理有效,
+  启用反代兜底,
+}) {
+  // SOCKS5/HTTP/HTTPS/TURN/SSTP 全局反代，或目标命中 SOCKS5 白名单 → 走代理链路
+  if (启用SOCKS5反代 && (启用SOCKS5全局反代 || 命中SOCKS5白名单)) return true;
+  // 落地代理有效（已配置且未命中黑名单）→ 必须经落地链路
+  if (落地代理有效) return true;
+  // 已显式配置 PROXYIP/链式代理(启用反代兜底=false)→ 强制走反代链路，禁止裸直连泄漏
+  if (!启用反代兜底) return true;
+  // 否则允许直连优先（失败再由 connectStreams 回调经反代兜底重试）
+  return false;
+}
+
 async function forwardataTCP(
   host,
   portNum,
@@ -3661,18 +3680,23 @@ async function forwardataTCP(
       throw err;
     }
   } else {
-    // 如果有落地代理，必须通过 connecttoPry 走落地代理链路，禁止直连绕过
     const 命中TCP黑名单 = await 域名匹配黑名单(host);
-    log(`[TCP转发黑名单决策] 目标: ${host}:${portNum} | 黑名单命中: ${命中TCP黑名单} | 落地代理: ${落地代理 || "无"} | 解析主机: ${parsed落地代理.hostname || "无"}`);
-    if (落地代理 && parsed落地代理.hostname && !命中TCP黑名单) {
-      log(`[TCP转发] 检测到落地代理，跳过直连，走代理链路`);
+    const 落地代理有效 = !!(落地代理 && parsed落地代理.hostname && !命中TCP黑名单);
+    const 命中SOCKS5白名单 = SOCKS5白名单.some((p) =>
+      new RegExp(`^${p.replace(/\*/g, ".*")}$`, "i").test(host),
+    );
+    const 走代理链路 = 应走代理链路({
+      启用SOCKS5反代,
+      启用SOCKS5全局反代,
+      命中SOCKS5白名单,
+      落地代理有效,
+      启用反代兜底,
+    });
+    log(`[TCP转发决策] 目标: ${host}:${portNum} | 走代理链路: ${走代理链路} | 落地有效: ${落地代理有效} | 命中黑名单: ${命中TCP黑名单} | 反代兜底: ${启用反代兜底 ? "是" : "否"}`);
+    if (走代理链路) {
+      // 有落地代理 / 命中白名单 / 已配置 PROXYIP(禁止裸直连) → 必须经反代链路，禁止直连绕过泄漏
       await connecttoPry();
     } else {
-      if (命中TCP黑名单) {
-        log(`[TCP转发] 目标 ${host} 命中落地代理黑名单，跳过落地代理走直连`);
-      } else if (!落地代理 || !parsed落地代理.hostname) {
-        log(`[TCP转发] 未配置落地代理，走直连`);
-      }
       try {
         log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
         const initialSocket = await connectDirect(host, portNum, rawData);
