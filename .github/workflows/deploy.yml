@@ -1,0 +1,51 @@
+name: Deploy to Cloudflare Workers
+
+on:
+  push:
+    branches: [main]
+    # 仅在影响部署的文件变化时才触发，避免改文档/测试也重新部署
+    paths:
+      - "_worker.js"
+      - "wrangler.toml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch: # 支持在 Actions 页面手动触发
+
+permissions:
+  contents: read
+
+# 同一时间只允许一个部署在跑，新部署取消进行中的旧部署
+concurrency:
+  group: deploy-cloudflare-workers
+  cancel-in-progress: true
+
+jobs:
+  # 门禁：单元测试不过就不部署
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run routing unit tests
+        run: node test_routing.mjs
+
+  deploy:
+    name: Deploy Worker
+    needs: test # 测试通过后才执行
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to Cloudflare Workers
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy
