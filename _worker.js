@@ -1333,6 +1333,11 @@ export default {
                       /\/(socks5|http|https|turn|sstp):\/\/[^/?&\s]+/i,
                       (匹配项) => "/ep/" + base64SecretEncode(匹配项.slice(1), userID)
                     );
+                    // 加密节点路径中的 PROXYIP 反代地址（/proxyip=... → /eip/加密值），避免反代 IP 明文暴露
+                    完整节点路径 = 完整节点路径.replace(
+                      /\/proxyip=([^/?&\s]+)/i,
+                      (_匹配项, IP列表) => "/eip/" + base64SecretEncode(IP列表, userID)
+                    );
                     if (isLoonOrSurge)
                       完整节点路径 = 完整节点路径.replace(/,/g, "%2C");
 
@@ -7397,7 +7402,8 @@ function base64SecretEncode(plaintext, secret) {
   for (let i = 0; i < mixed.length; i++) {
     binary += String.fromCharCode(mixed[i]);
   }
-  return btoa(binary);
+  // URL 安全 base64（base64url）：+ → -、/ → _、去掉末尾填充，确保可安全置于 URL 路径段
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
 /**
@@ -7407,7 +7413,10 @@ function base64SecretEncode(plaintext, secret) {
  * @returns {string} 解码后的原始明文字符串
  */
 function base64SecretDecode(encoded, secret) {
-  const binary = atob(encoded);
+  // 兼容 base64url（- _ 无填充）与旧版标准 base64（+ / 带填充）
+  let b64 = String(encoded).replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  const binary = atob(b64);
   const mixed = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
     mixed[i] = binary.charCodeAt(i);
@@ -9081,6 +9090,11 @@ async function 读取config_JSON(
     /\/(socks5|http|https|turn|sstp):\/\/[^/?&\s]+/i,
     (匹配项) => "/ep/" + base64SecretEncode(匹配项.slice(1), userID)
   );
+  // 加密节点路径中的 PROXYIP 反代地址（如 /proxyip=1.2.3.4,5.6.7.8 → /eip/加密值），避免反代 IP 列表明文暴露
+  config_JSON.完整节点路径 = config_JSON.完整节点路径.replace(
+    /\/proxyip=([^/?&\s]+)/i,
+    (_匹配项, IP列表) => "/eip/" + base64SecretEncode(IP列表, userID)
+  );
   const 传输路径参数值 = 获取传输路径参数值(
     config_JSON,
     config_JSON.完整节点路径,
@@ -9771,6 +9785,17 @@ async function 反代参数获取(url, uuid, env = null) {
       );
     } catch (err) {
       console.error("解析落地代理地址失败:", err.message);
+    }
+  }
+
+  // 优先尝试解密加密的 PROXYIP 反代路径（/eip/ 格式，base64SecretEncode 编码，密钥为 uuid）
+  const 加密反代IP匹配 = /\/eip\/([^/?&\s]+)/i.exec(pathname);
+  if (加密反代IP匹配) {
+    try {
+      const 解密反代IP = base64SecretDecode(加密反代IP匹配[1], uuid);
+      if (解密反代IP && !解析代理URL(解密反代IP)) return 设置反代IP(解密反代IP);
+    } catch {
+      // 解密失败则继续尝试明文路径匹配
     }
   }
 
